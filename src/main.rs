@@ -1,7 +1,6 @@
 use std::ops::Range;
 use sdl2::{self, pixels::Color, event::Event, keyboard::Keycode, mouse::MouseButton, render::Canvas, rect::{Rect, Point}};
-use ahash::RandomState;
-use std::collections::HashMap;
+use ahash::HashSetExt;
 
 struct Conditions
 {
@@ -43,17 +42,17 @@ impl Conditions
 }
 
 fn main() {
-    let res: [u32; 2] = [600, 600];
+    let mut res: [u32; 2] = [600, 600];
     let mut start_coords: [i32; 2] = [0, 0];
     let mut pixel_size: [u32; 2] = [3, 3];
     let (mut canvas, mut event_pump) = init_canvas(res);
 
-    let mut target_frame_ms: f64 = 10.;
+    let mut target_frame_ms: f64 = 13.;
     let mut target_frame_time = std::time::Duration::from_micros((target_frame_ms * 1000.) as u64);
 
-    let mut grid_lines = true;
+    let mut grid_lines = false;
 
-    let mut alive_cells: HashMap<[i32; 2], bool, RandomState> = HashMap::default();
+    let mut alive_cells: ahash::HashSet<[i32; 2]> = HashSetExt::new();
     let cond = Conditions::default();
     if !cond.check_valid() {panic!("the provided conditions weren't valid");};
     
@@ -66,6 +65,8 @@ fn main() {
 
     'running: loop
     {
+        let mut changed = false;
+
         let start_time = std::time::SystemTime::now();
         for event in event_pump.poll_iter()
         {
@@ -91,12 +92,12 @@ fn main() {
                         Keycode::Up =>
                         {
                             alive_cells = next_grid_state(alive_cells, &cond);
-                            draw_grid(&alive_cells, &mut canvas, start_coords, pixel_size, grid_lines);
+                            changed = true;
                         }
                         Keycode::G =>
                         {
                             grid_lines = !grid_lines;
-                            draw_grid(&alive_cells, &mut canvas, start_coords, pixel_size, grid_lines);
+                            changed = true;
                         }
                         _ => {}
                     }
@@ -123,19 +124,20 @@ fn main() {
                         {
                             mmd_down = true;
                             let coords = mouse_to_grid_coords([x as u32, y as u32], pixel_size, start_coords);
-                            if alive_cells.contains_key(&coords)
+                            if alive_cells.contains(&coords)
                             {
-                                alive_cells.remove_entry(&coords);
+                                alive_cells.remove(&coords);
                             }
                             else
                             {
-                                alive_cells.insert(coords, false);
+                                alive_cells.insert(coords);
                             }
-                            draw_grid(&alive_cells, &mut canvas, start_coords, pixel_size, grid_lines);
+                            changed = true;
                         }
                         MouseButton::Right =>
                         {
                             spawn_glider(mouse_to_grid_coords([x as u32, y as u32], pixel_size, start_coords), &mut alive_cells);
+                            changed = true;
                         }
                         _ => {}
                     }
@@ -162,10 +164,10 @@ fn main() {
                     if mmd_down
                     {
                         let coords = mouse_to_grid_coords([x as u32, y as u32], pixel_size, start_coords);
-                        if !alive_cells.contains_key(&coords)
+                        if !alive_cells.contains(&coords)
                         {
-                            alive_cells.insert(coords, false);
-                            draw_grid(&alive_cells, &mut canvas, start_coords, pixel_size, grid_lines);
+                            alive_cells.insert(coords);
+                            changed = true;
                         }
                     }
                     if lmd_down
@@ -173,18 +175,24 @@ fn main() {
                         let coords = mouse_to_grid_coords([x as u32, y as u32], pixel_size, start_coords);
                         start_coords[0]+= last_click_grid_cell[0] - coords[0];
                         start_coords[1]+= last_click_grid_cell[1] - coords[1];
-                        
-                        /*start_coords[0] -= xrel;
-                        start_coords[1] -= yrel;*/
-                        draw_grid(&alive_cells, &mut canvas, start_coords, pixel_size, grid_lines);
+
+                        changed = true;
                     }
                 }
 
                 Event::MouseWheel {y, ..} =>
                 {
+                    let old_grid_size = [res[0] / pixel_size[0], res[1] / pixel_size[1]];
+
                     pixel_size[0] = if pixel_size[0] as i32 + y > 1 {(pixel_size[0] as i32 + y) as u32} else {1};
                     pixel_size[1] = if pixel_size[1] as i32 + y > 1 {(pixel_size[1] as i32 + y) as u32} else {1};
-                    draw_grid(&alive_cells, &mut canvas, start_coords, pixel_size, grid_lines);
+
+                    let new_grid_size = [res[0] / pixel_size[0], res[1] / pixel_size[1]];
+
+                    start_coords[0] += (old_grid_size[0] as i32 - new_grid_size[0] as i32) / 2;
+                    start_coords[1] += (old_grid_size[1] as i32 - new_grid_size[1] as i32) / 2;
+
+                    changed = true;
                 }
 
                 Event::Window {win_event, ..} =>
@@ -194,7 +202,8 @@ fn main() {
                         sdl2::event::WindowEvent::Resized(x, y) =>
                         {
                             canvas.window_mut().set_size(x as u32, y as u32).unwrap();
-                            draw_grid(&alive_cells, &mut canvas, start_coords, pixel_size, grid_lines);
+                            res = [x as u32, y as u32];
+                            changed = true;
                         }
                         _ => {}
                     }
@@ -206,18 +215,30 @@ fn main() {
         if !pause
         {
             alive_cells = next_grid_state(alive_cells, &cond);
-            draw_grid(&alive_cells, &mut canvas, start_coords, pixel_size, grid_lines);
+            changed = true;
         }
-        let sleep_time = target_frame_time.saturating_sub(
-            std::time::SystemTime::now().duration_since(start_time).unwrap()
-        );
-        std::thread::sleep(
-            sleep_time
-        );
+
+        if changed
+        {
+            draw_grid(&alive_cells, &mut canvas, start_coords, pixel_size, 
+                (grid_lines || (pixel_size[0] > 20 && pixel_size[1] > 20)) && (pixel_size[0] > 1 && pixel_size[1] > 1)
+                );
+ 
+            if !pause
+            {
+                let sleep_time = target_frame_time.saturating_sub(
+                    std::time::SystemTime::now().duration_since(start_time).unwrap()
+                );
+                std::thread::sleep(
+                    sleep_time
+                );
+            }
+        }
     }
+
 }
 
-fn get_nbghr_nb([x, y]: [i32; 2], alive_cells: &HashMap<[i32; 2], bool, RandomState>) -> u8
+fn get_nbghr_nb([x, y]: [i32; 2], alive_cells: &ahash::HashSet<[i32; 2]>) -> u8
 {
     let mut nb: u8 = 0;
 
@@ -229,7 +250,7 @@ fn get_nbghr_nb([x, y]: [i32; 2], alive_cells: &HashMap<[i32; 2], bool, RandomSt
 
     for cell in nghbrs
     {
-        if alive_cells.contains_key(&cell)
+        if alive_cells.contains(&cell)
         {
             nb+=1;
         }
@@ -238,7 +259,7 @@ fn get_nbghr_nb([x, y]: [i32; 2], alive_cells: &HashMap<[i32; 2], bool, RandomSt
     nb
 }
 
-fn spawn_glider(glider_coords: [i32; 2], alive_cells: &mut HashMap<[i32; 2], bool, RandomState>)
+fn spawn_glider(glider_coords: [i32; 2], alive_cells: &mut ahash::HashSet<[i32; 2]>)
 {
 
     let glider = 
@@ -248,24 +269,24 @@ fn spawn_glider(glider_coords: [i32; 2], alive_cells: &mut HashMap<[i32; 2], boo
 
     for cell in glider
     {
-        if !alive_cells.contains_key(&cell)
+        if !alive_cells.contains(&cell)
         {
-            alive_cells.insert([glider_coords[0] + cell[0], glider_coords[1] + cell[1]], false);
+            alive_cells.insert([glider_coords[0] + cell[0], glider_coords[1] + cell[1]]);
         }
     }
     
 }
 
-fn draw_grid(alive_cells: &HashMap<[i32; 2], bool, RandomState>, canvas: &mut Canvas<sdl2::video::Window>, start_coords: [i32; 2], pixel_size: [u32; 2], grid_lines: bool)
+fn draw_grid(alive_cells: &ahash::HashSet<[i32; 2]>, canvas: &mut Canvas<sdl2::video::Window>, start_coords: [i32; 2], pixel_size: [u32; 2], grid_lines: bool)
 {
     canvas.set_draw_color(Color::WHITE);
     canvas.clear();
 
     canvas.set_draw_color(Color::BLACK);
 
-    for key in alive_cells.keys()
+    for coord in alive_cells.iter()
     {
-        let [x, y] = key;
+        let [x, y] = coord;
         canvas.fill_rect(Rect::new(
             pixel_size[0] as i32 * (x - start_coords[0]),
             pixel_size[1] as i32 * (y - start_coords[1]),
@@ -303,14 +324,14 @@ fn mouse_to_grid_coords(mouse: [u32; 2], pixel_size: [u32; 2], start: [i32; 2]) 
     ]
 }
 
-fn next_grid_state(alive_cells: HashMap<[i32; 2], bool, RandomState>, cond: &Conditions) -> HashMap<[i32; 2], bool, RandomState>
+fn next_grid_state(alive_cells: ahash::HashSet<[i32; 2]>, cond: &Conditions) -> ahash::HashSet<[i32; 2]>
 {
-    let mut next_state: HashMap<[i32; 2], bool, RandomState> = HashMap::default();
-    let mut checked: HashMap<[i32; 2], bool, RandomState> = HashMap::default();
+    let mut next_state: ahash::HashSet<[i32; 2]> = HashSetExt::new();
+    let mut checked: ahash::HashSet<[i32; 2]> = HashSetExt::new();
 
-    for key in alive_cells.keys()
+    for coord in alive_cells.iter()
     {
-        let [x, y]: [i32; 2] = *key;
+        let [x, y]: [i32; 2] = *coord;
 
         let nghbrs = [
             [x-1, y-1], [x-1, y], [x-1, y+1],
@@ -320,10 +341,10 @@ fn next_grid_state(alive_cells: HashMap<[i32; 2], bool, RandomState>, cond: &Con
 
         for cell in nghbrs
         {
-            if !checked.contains_key(&cell) && cond.cell_next_state(get_nbghr_nb(cell, &alive_cells), alive_cells.contains_key(&cell))
+            if !checked.contains(&cell) && cond.cell_next_state(get_nbghr_nb(cell, &alive_cells), alive_cells.contains(&cell))
             {
-                next_state.insert(cell, false);
-                checked.insert(cell, false);
+                next_state.insert(cell);
+                checked.insert(cell);
             }
         }
     }
